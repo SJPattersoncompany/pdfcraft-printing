@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, createEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, createEvent, waitFor, cleanup, act } from '@testing-library/react';
 import React from 'react';
 import { PDFStudio } from '@/components/studio/PDFStudio';
 import * as tauriBridge from '@/lib/tauri-bridge';
@@ -39,6 +39,10 @@ vi.mock('@/lib/tauri-bridge', () => ({
   saveBlobFile: vi.fn().mockResolvedValue(true),
   getSystemPrinters: vi.fn().mockResolvedValue([]),
   printPdfFile: vi.fn().mockResolvedValue(true),
+  listSystemPrinters: vi.fn().mockResolvedValue([]),
+  openPrinterSettings: vi.fn().mockResolvedValue({ success: true }),
+  takeOpenedFiles: vi.fn().mockResolvedValue({ files: [], errors: [] }),
+  onFilesOpened: vi.fn().mockResolvedValue(() => {}),
 }));
 
 const originalCreateObjectURL = URL.createObjectURL;
@@ -1283,7 +1287,45 @@ describe('PDFStudio Component', () => {
       expect(strip.scrollLeft).toBe(0);
     });
   });
+
+  describe('files opened from the operating system (desktop app)', () => {
+    it('opens a PDF passed at launch and a second PDF from a later launch as tabs', async () => {
+      const bridge = await import('@/lib/tauri-bridge');
+      let filesOpenedHandler: (() => void) | undefined;
+      vi.mocked(bridge.isTauri).mockReturnValue(true);
+      vi.mocked(bridge.onFilesOpened).mockImplementation(async (handler) => {
+        filesOpenedHandler = handler;
+        return () => {};
+      });
+      vi.mocked(bridge.takeOpenedFiles)
+        .mockResolvedValueOnce({
+          files: [new File(['%PDF'], '123 Main St Appraisal.pdf', { type: 'application/pdf' })],
+          errors: [],
+        })
+        .mockResolvedValueOnce({
+          files: [new File(['%PDF'], '456 Oak Ave Comps.pdf', { type: 'application/pdf' })],
+          errors: [],
+        });
+
+      render(<PDFStudio locale="en" />);
+
+      await waitFor(() => {
+        expect(screen.getAllByText('123 Main St Appraisal.pdf').length).toBeGreaterThan(0);
+      });
+      expect(filesOpenedHandler).toBeDefined();
+
+      // A second launch (double-clicking another PDF) signals the running window.
+      await act(async () => {
+        filesOpenedHandler?.();
+      });
+
+      await waitFor(() => {
+        expect(screen.getAllByText('456 Oak Ave Comps.pdf').length).toBeGreaterThan(0);
+      });
+      // The first document is still open in its own tab.
+      expect(screen.getAllByText('123 Main St Appraisal.pdf').length).toBeGreaterThan(0);
+
+      vi.mocked(bridge.isTauri).mockReturnValue(false);
+    });
+  });
 });
-
-
-

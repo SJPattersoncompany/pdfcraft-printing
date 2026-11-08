@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod file_open;
 mod printing;
 
 use serde::Deserialize;
@@ -220,6 +221,14 @@ fn main() {
     }
 
     tauri::Builder::default()
+        // Must be the first plugin: a second launch (e.g. double-clicking another PDF)
+        // hands its files to this window and exits instead of opening a new window.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            let files = file_open::pdf_paths_from_args(argv, std::path::Path::new(&cwd));
+            file_open::queue(app, files);
+            file_open::focus_main_window(app);
+        }))
+        .manage(file_open::OpenedFiles::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(
@@ -236,6 +245,13 @@ fn main() {
                 .build(),
         )
         .setup(move |app| {
+            // PDFs passed to this first launch ("Open with", double-click).
+            let cwd = env::current_dir().unwrap_or_default();
+            file_open::queue(
+                app.handle(),
+                file_open::pdf_paths_from_args(env::args(), &cwd),
+            );
+
             if use_loopback {
                 if !wait_for_loopback(loopback_port, std::time::Duration::from_secs(5)) {
                     eprintln!(
@@ -262,8 +278,29 @@ fn main() {
             open_url,
             printing::get_system_printers,
             printing::print_pdf_file,
-            printing::open_printer_settings
+            printing::open_printer_settings,
+            file_open::take_opened_files,
+            file_open::has_opened_files,
+            file_open::read_file_binary
         ])
-        .run(context)
-        .expect("error while running tauri application");
+        .build(context)
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            // macOS delivers files opened from Finder as an event, not as arguments.
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            if let tauri::RunEvent::Opened { urls } = &_event {
+                let files: Vec<String> = urls
+                    .iter()
+                    .filter_map(|u| u.to_file_path().ok())
+                    .filter(|p| {
+                        p.extension()
+                            .map(|e| e.eq_ignore_ascii_case("pdf"))
+                            .unwrap_or(false)
+                    })
+                    .map(|p| p.display().to_string())
+                    .collect();
+                file_open::queue(_app, files);
+                file_open::focus_main_window(_app);
+            }
+        });
 }

@@ -31,6 +31,9 @@ fn main() {
             "get_system_printers",
             "print_pdf_file",
             "open_printer_settings",
+            "take_opened_files",
+            "has_opened_files",
+            "read_file_binary",
         ]));
     if let Err(error) = tauri_build::try_build(attributes) {
         eprintln!("Error in tauri_build: {error:#}");

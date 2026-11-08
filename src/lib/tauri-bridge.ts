@@ -374,3 +374,58 @@ export async function openPrinterSettings(
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// PDFs opened from the operating system (double-click, "Open with", second launch)
+// ---------------------------------------------------------------------------
+
+/** Emitted by the desktop app whenever new files are waiting to be opened. */
+export const FILES_OPENED_EVENT = 'pdfcraft://files-opened';
+
+/** True when the desktop app has PDFs waiting to be opened (does not take them). */
+export async function hasOpenedFiles(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    const invoke = await getTauriInvoke();
+    return await invoke<boolean>('has_opened_files');
+  } catch {
+    return false;
+  }
+}
+
+function baseName(path: string): string {
+  const parts = path.split(/[\\/]/);
+  return parts[parts.length - 1] || 'document.pdf';
+}
+
+/**
+ * Takes the PDFs waiting to be opened and reads them into File objects.
+ * Files that can no longer be read are reported in `errors`.
+ */
+export async function takeOpenedFiles(): Promise<{ files: File[]; errors: string[] }> {
+  if (!isTauri()) return { files: [], errors: [] };
+  const invoke = await getTauriInvoke();
+  const paths = await invoke<string[]>('take_opened_files');
+  const files: File[] = [];
+  const errors: string[] = [];
+  for (const path of paths) {
+    try {
+      const data = await invoke<ArrayBuffer>('read_file_binary', { path });
+      files.push(new File([data], baseName(path), { type: 'application/pdf' }));
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return { files, errors };
+}
+
+/** Calls `handler` whenever the desktop app receives new files. Returns an unsubscribe function. */
+export async function onFilesOpened(handler: () => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  try {
+    const { listen } = await import('@tauri-apps/api/event');
+    return await listen(FILES_OPENED_EVENT, () => handler());
+  } catch {
+    return () => {};
+  }
+}

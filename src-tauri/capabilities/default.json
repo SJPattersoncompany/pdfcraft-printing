@@ -30,6 +30,9 @@
     "allow-open-url",
     "allow-get-system-printers",
     "allow-print-pdf-file",
-    "allow-open-printer-settings"
+    "allow-open-printer-settings",
+    "allow-take-opened-files",
+    "allow-has-opened-files",
+    "allow-read-file-binary"
   ]
 }

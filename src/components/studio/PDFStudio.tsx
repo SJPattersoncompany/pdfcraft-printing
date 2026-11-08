@@ -38,7 +38,7 @@ import {
   findStudioToolConfig,
   addStudioRecentTool,
 } from './studio-processors';
-import { saveBlobFile, isTauri } from '@/lib/tauri-bridge';
+import { saveBlobFile, isTauri, takeOpenedFiles, onFilesOpened } from '@/lib/tauri-bridge';
 import { PrintDialog } from '@/components/print/PrintDialog';
 import { withBasePath } from '@/lib/utils/path';
 import { getToolContent, type Locale } from '@/config/tool-content';
@@ -370,6 +370,40 @@ export const PDFStudio: React.FC<PDFStudioProps> = ({
   useLayoutEffect(() => {
     handleAddFilesRef.current = handleAddFiles;
   }, [handleAddFiles]);
+
+  // Desktop app: PDFs opened from the operating system (double-click, "Open with", or a
+  // second launch while PDFCraft is running) open here as new tabs.
+  const notifyRef = useRef(notify);
+  useLayoutEffect(() => {
+    notifyRef.current = notify;
+  }, [notify]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    const openPending = async () => {
+      try {
+        // Files are taken from the queue atomically, so always use what was taken.
+        const { files, errors } = await takeOpenedFiles();
+        if (files.length > 0) handleAddFilesRef.current?.(files);
+        if (errors.length > 0) notifyRef.current('error', errors.join('\n'));
+      } catch (err: any) {
+        notifyRef.current('error', err?.message || String(err));
+      }
+    };
+
+    openPending();
+    onFilesOpened(openPending).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Handle Drag & Drop anywhere in the Studio window
   const handleDragOver = useCallback((e: React.DragEvent) => {
