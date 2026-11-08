@@ -30,6 +30,8 @@ jobs:
   # ============================================================================
   build:
     runs-on: ${{ matrix.runner }}
+    # The print-test branch only needs the Windows installer workflow.
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'cursor/windows-direct-print-') }}
     
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}

@@ -1,0 +1,16 @@
+UNOFFICIAL TEST BUILD
+
+This Windows installer is from SJPattersoncompany/pdfcraft-printing
+for print-path and single-instance open testing. It is not a PDFCraftTool
+release and it is not signed.
+The bundle id in this build is com.pdfcraft.printtest (product name
+"PDFCraft Print Test"), which is not the official com.pdfcraft.app id.
+It is a separate instance from an official PDFCraft copy.
+The installer registers its own PDF file association
+(PDFCraftPrintTest.PDF). That association was not tested in a real
+Windows shell, and installing this over an existing PDFCraft copy has
+not been tested. It may register a second PDF handler. It does not
+claim to be a safe replacement for an installed copy.
+Physical printing has not been verified.
+This build does not check for updates and does not offer the official
+PDFCraftTool installer.

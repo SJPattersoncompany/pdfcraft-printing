@@ -13,6 +13,9 @@ env:
 jobs:
   build-tauri:
     name: Build ${{ matrix.platform }}
+    # The print-test branch has its own one-job Windows installer workflow.
+    # Skip this three-platform matrix for that branch only.
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'cursor/windows-direct-print-') }}
     strategy:
       fail-fast: false
       matrix:
