@@ -15,6 +15,7 @@ vi.mock('next-intl', () => ({
     };
     return translations[key] || key;
   },
+  useLocale: () => 'en',
 }));
 
 // Mock path util
@@ -65,7 +66,7 @@ describe('PDFReaderTool', () => {
       expect(screen.getByText('sample.pdf')).toBeInTheDocument();
     });
 
-    const printBtn = screen.getByTitle('打印 (Ctrl+P)');
+    const printBtn = screen.getByTitle('Print (Ctrl+P)');
     expect(printBtn).toBeInTheDocument();
   });
 
@@ -87,7 +88,7 @@ describe('PDFReaderTool', () => {
         expect(screen.getByText('sample.pdf')).toBeInTheDocument();
       });
 
-      const printBtn = screen.getByTitle('打印 (Ctrl+P)');
+      const printBtn = screen.getByTitle('Print (Ctrl+P)');
       fireEvent.click(printBtn);
 
       expect(printSpy).toHaveBeenCalled();
@@ -100,7 +101,7 @@ describe('PDFReaderTool', () => {
 
   it('opens native print modal in Tauri desktop mode when print button is clicked', async () => {
     vi.spyOn(tauriBridge, 'isTauri').mockReturnValue(true);
-    vi.spyOn(tauriBridge, 'getSystemPrinters').mockResolvedValue([
+    vi.spyOn(tauriBridge, 'listSystemPrinters').mockResolvedValue([
       { name: 'HP LaserJet M14', is_default: true, port_name: 'USB001' },
       { name: 'SHARP MX-M3558NV', is_default: false, port_name: '192.168.1.100' },
     ]);
@@ -112,18 +113,18 @@ describe('PDFReaderTool', () => {
       expect(screen.getByText('sample.pdf')).toBeInTheDocument();
     });
 
-    const printBtn = screen.getByTitle('打印 (Ctrl+P)');
+    const printBtn = screen.getByTitle('Print (Ctrl+P)');
     fireEvent.click(printBtn);
 
     await waitFor(() => {
-      expect(screen.getByText('打印文档')).toBeInTheDocument();
-      expect(screen.getByText('HP LaserJet M14 (默认)')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Print' })).toBeInTheDocument();
+      expect(screen.getByText('HP LaserJet M14 (default)')).toBeInTheDocument();
     });
   });
 
   it('responds to pdfcraft-print-requested message posted by viewer iframe', async () => {
     vi.spyOn(tauriBridge, 'isTauri').mockReturnValue(true);
-    vi.spyOn(tauriBridge, 'getSystemPrinters').mockResolvedValue([
+    vi.spyOn(tauriBridge, 'listSystemPrinters').mockResolvedValue([
       { name: 'Office Printer', is_default: true, port_name: 'NET' },
     ]);
 
@@ -144,8 +145,8 @@ describe('PDFReaderTool', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText('打印文档')).toBeInTheDocument();
-      expect(screen.getByText('Office Printer (默认)')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Print' })).toBeInTheDocument();
+      expect(screen.getByText('Office Printer (default)')).toBeInTheDocument();
     });
   });
 
@@ -200,7 +201,7 @@ describe('PDFReaderTool', () => {
 
   it('triggers print modal on Cmd+P (metaKey) and uppercase P in Tauri desktop mode', async () => {
     vi.spyOn(tauriBridge, 'isTauri').mockReturnValue(true);
-    vi.spyOn(tauriBridge, 'getSystemPrinters').mockResolvedValue([
+    vi.spyOn(tauriBridge, 'listSystemPrinters').mockResolvedValue([
       { name: 'HP LaserJet M14', is_default: true, port_name: 'USB001' },
     ]);
 
@@ -219,14 +220,14 @@ describe('PDFReaderTool', () => {
 
     expect(preventDefaultSpy).toHaveBeenCalled();
     await waitFor(() => {
-      expect(screen.getByText('打印文档')).toBeInTheDocument();
-      expect(screen.getByText('HP LaserJet M14 (默认)')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Print' })).toBeInTheDocument();
+      expect(screen.getByText('HP LaserJet M14 (default)')).toBeInTheDocument();
     });
   });
 
   it('ignores Ctrl+Alt+P due to altKey guard', async () => {
     vi.spyOn(tauriBridge, 'isTauri').mockReturnValue(true);
-    const getPrintersSpy = vi.spyOn(tauriBridge, 'getSystemPrinters').mockResolvedValue([]);
+    const getPrintersSpy = vi.spyOn(tauriBridge, 'listSystemPrinters').mockResolvedValue([]);
 
     render(<PDFReaderTool />);
     fireEvent.click(screen.getByTestId('mock-uploader'));
@@ -243,12 +244,12 @@ describe('PDFReaderTool', () => {
 
     expect(preventDefaultSpy).not.toHaveBeenCalled();
     expect(getPrintersSpy).not.toHaveBeenCalled();
-    expect(screen.queryByText('打印文档')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Print' })).not.toBeInTheDocument();
   });
 
   it('does not re-trigger loadPrinters when print modal is already open', async () => {
     vi.spyOn(tauriBridge, 'isTauri').mockReturnValue(true);
-    const getPrintersSpy = vi.spyOn(tauriBridge, 'getSystemPrinters').mockResolvedValue([
+    const getPrintersSpy = vi.spyOn(tauriBridge, 'listSystemPrinters').mockResolvedValue([
       { name: 'Office Printer', is_default: true, port_name: 'NET' },
     ]);
 
@@ -265,7 +266,7 @@ describe('PDFReaderTool', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText('打印文档')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Print' })).toBeInTheDocument();
     });
     expect(getPrintersSpy).toHaveBeenCalledTimes(1);
 
@@ -297,7 +298,7 @@ describe('PDFReaderTool', () => {
 
   it('persists newly selected printer to localStorage on dropdown change', async () => {
     vi.spyOn(tauriBridge, 'isTauri').mockReturnValue(true);
-    vi.spyOn(tauriBridge, 'getSystemPrinters').mockResolvedValue([
+    vi.spyOn(tauriBridge, 'listSystemPrinters').mockResolvedValue([
       { name: 'HP LaserJet M14', is_default: true, port_name: 'USB001' },
       { name: 'SHARP MX-M3558NV', is_default: false, port_name: '192.168.1.100' },
     ]);
@@ -310,7 +311,7 @@ describe('PDFReaderTool', () => {
       expect(screen.getByText('sample.pdf')).toBeInTheDocument();
     });
 
-    const printBtn = screen.getByTitle('打印 (Ctrl+P)');
+    const printBtn = screen.getByTitle('Print (Ctrl+P)');
     fireEvent.click(printBtn);
 
     await waitFor(() => {
@@ -329,7 +330,7 @@ describe('PDFReaderTool', () => {
 
   it('restores previously saved printer from localStorage over default when opening print modal', async () => {
     vi.spyOn(tauriBridge, 'isTauri').mockReturnValue(true);
-    vi.spyOn(tauriBridge, 'getSystemPrinters').mockResolvedValue([
+    vi.spyOn(tauriBridge, 'listSystemPrinters').mockResolvedValue([
       { name: 'HP LaserJet M14', is_default: true, port_name: 'USB001' },
       { name: 'SHARP MX-M3558NV', is_default: false, port_name: '192.168.1.100' },
     ]);
@@ -342,7 +343,7 @@ describe('PDFReaderTool', () => {
       expect(screen.getByText('sample.pdf')).toBeInTheDocument();
     });
 
-    const printBtn = screen.getByTitle('打印 (Ctrl+P)');
+    const printBtn = screen.getByTitle('Print (Ctrl+P)');
     fireEvent.click(printBtn);
 
     await waitFor(() => {
@@ -355,7 +356,7 @@ describe('PDFReaderTool', () => {
 
   it('falls back to default printer if saved localStorage printer is not in list', async () => {
     vi.spyOn(tauriBridge, 'isTauri').mockReturnValue(true);
-    vi.spyOn(tauriBridge, 'getSystemPrinters').mockResolvedValue([
+    vi.spyOn(tauriBridge, 'listSystemPrinters').mockResolvedValue([
       { name: 'HP LaserJet M14', is_default: true, port_name: 'USB001' },
       { name: 'SHARP MX-M3558NV', is_default: false, port_name: '192.168.1.100' },
     ]);
@@ -368,7 +369,7 @@ describe('PDFReaderTool', () => {
       expect(screen.getByText('sample.pdf')).toBeInTheDocument();
     });
 
-    const printBtn = screen.getByTitle('打印 (Ctrl+P)');
+    const printBtn = screen.getByTitle('Print (Ctrl+P)');
     fireEvent.click(printBtn);
 
     await waitFor(() => {

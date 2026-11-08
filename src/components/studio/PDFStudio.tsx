@@ -38,7 +38,8 @@ import {
   findStudioToolConfig,
   addStudioRecentTool,
 } from './studio-processors';
-import { saveBlobFile, isTauri, getSystemPrinters, printPdfFile } from '@/lib/tauri-bridge';
+import { saveBlobFile, isTauri } from '@/lib/tauri-bridge';
+import { PrintDialog } from '@/components/print/PrintDialog';
 import { withBasePath } from '@/lib/utils/path';
 import { getToolContent, type Locale } from '@/config/tool-content';
 
@@ -134,6 +135,7 @@ export const PDFStudio: React.FC<PDFStudioProps> = ({
   // Studio UI states
   const [activeToolId, setActiveToolId] = useState<StudioToolId | null>(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
+  const [isPrintDialogOpen, setIsPrintDialogOpen] = useState<boolean>(false);
   const [isApplying, setIsApplying] = useState<boolean>(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState<boolean>(false);
@@ -604,12 +606,10 @@ export const PDFStudio: React.FC<PDFStudioProps> = ({
 
     try {
       if (isTauri()) {
-        const printers = await getSystemPrinters();
-        if (printers.length > 0) {
-          await printPdfFile(currentBlob, printers[0].name);
-          notify('success', isZh ? '已发送打印任务' : 'Print job sent');
-          return;
-        }
+        // Let the user pick the printer (previously the job went silently to whichever
+        // printer the system listed first, e.g. "Fax" or "Microsoft Print to PDF").
+        setIsPrintDialogOpen(true);
+        return;
       }
 
       // Web fallback: trigger iframe print
@@ -1269,6 +1269,14 @@ export const PDFStudio: React.FC<PDFStudioProps> = ({
           <span>{notification.message}</span>
         </div>
       )}
+
+      <PrintDialog
+        isOpen={isPrintDialogOpen}
+        onClose={() => setIsPrintDialogOpen(false)}
+        file={currentBlob}
+        documentName={file?.name}
+        locale={validLocale}
+      />
     </div>
   );
 };

@@ -29,6 +29,7 @@
     "allow-get-temp-dir",
     "allow-open-url",
     "allow-get-system-printers",
-    "allow-print-pdf-file"
+    "allow-print-pdf-file",
+    "allow-open-printer-settings"
   ]
 }

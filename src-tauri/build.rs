@@ -20,8 +20,8 @@ fn main() {
     // secure context, which breaks Cross-Origin Isolation / SharedArrayBuffer). That origin
     // is classified as *remote*, so the command permissions have to be declared here and
     // granted in the capability for them to stay callable from the frontend.
-    let attributes = tauri_build::Attributes::new().app_manifest(
-        tauri_build::AppManifest::new().commands(&[
+    let attributes =
+        tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "open_files",
             "save_file",
             "read_file",
@@ -30,8 +30,8 @@ fn main() {
             "open_url",
             "get_system_printers",
             "print_pdf_file",
-        ]),
-    );
+            "open_printer_settings",
+        ]));
     if let Err(error) = tauri_build::try_build(attributes) {
         eprintln!("Error in tauri_build: {error:#}");
         std::process::exit(1);

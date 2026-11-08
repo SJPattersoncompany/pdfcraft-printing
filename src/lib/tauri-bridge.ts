@@ -283,45 +283,61 @@ export interface SystemPrinter {
 }
 
 /**
- * Fetch installed system printers.
- * In a desktop Tauri environment: queries real OS printers (local, network, USB).
- * In a standard browser environment: returns empty array.
+ * Fetch installed system printers (default printer first).
+ * Desktop app only; throws if the operating system could not be queried.
+ * In a standard browser environment: returns an empty array.
+ */
+export async function listSystemPrinters(): Promise<SystemPrinter[]> {
+  if (!isTauri()) return [];
+  const invoke = await getTauriInvoke();
+  return await invoke<SystemPrinter[]>('get_system_printers');
+}
+
+/**
+ * Like {@link listSystemPrinters} but never throws (returns an empty list on failure).
  */
 export async function getSystemPrinters(): Promise<SystemPrinter[]> {
-  if (isTauri()) {
-    try {
-      const invoke = await getTauriInvoke();
-      return await invoke<SystemPrinter[]>('get_system_printers');
-    } catch (err) {
-      console.warn('Failed to get system printers via Tauri:', err);
-    }
+  try {
+    return await listSystemPrinters();
+  } catch (err) {
+    console.warn('Failed to get system printers via Tauri:', err);
+    return [];
   }
-  return [];
+}
+
+export interface PrintOptions {
+  /** Number of collated copies (1-99). */
+  copies?: number;
+  /** Print on both sides of the paper (long-edge binding). */
+  duplex?: boolean;
+  /** Document name shown in the printer queue. */
+  jobName?: string;
 }
 
 /**
  * Print a PDF document natively or via browser fallback.
- * In desktop Tauri environment: invokes native print to specific printer or default printer.
+ * In desktop Tauri environment: sends the PDF straight to the given printer (or the
+ * system default printer). The bytes go as a raw IPC body, options as headers.
  * In browser environment: falls back to window.print().
  */
 export async function printPdfFile(
   fileData: Blob | Uint8Array,
-  printerName?: string
+  printerName?: string,
+  options: PrintOptions = {}
 ): Promise<{ success: boolean; error?: string }> {
   if (isTauri()) {
     try {
       const invoke = await getTauriInvoke();
-      let bytes: Uint8Array;
-      if (fileData instanceof Uint8Array) {
-        bytes = fileData;
-      } else {
-        const buffer = await fileData.arrayBuffer();
-        bytes = new Uint8Array(buffer);
-      }
-      await invoke('print_pdf_file', {
-        data: Array.from(bytes),
-        printerName: printerName || null,
-      });
+      const bytes =
+        fileData instanceof Uint8Array ? fileData : new Uint8Array(await fileData.arrayBuffer());
+      const copies = Math.min(99, Math.max(1, Math.floor(options.copies ?? 1)));
+      const headers: Record<string, string> = {
+        'x-copies': String(copies),
+        'x-duplex': options.duplex ? '1' : '0',
+      };
+      if (printerName) headers['x-printer-name'] = encodeURIComponent(printerName);
+      if (options.jobName) headers['x-job-name'] = encodeURIComponent(options.jobName);
+      await invoke('print_pdf_file', bytes, { headers });
       return { success: true };
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -336,5 +352,25 @@ export async function printPdfFile(
   }
 
   return { success: false, error: 'Environment does not support printing' };
+}
+
+/**
+ * Open the operating system's printer setup (desktop app only).
+ * `add` opens the Add Printer wizard where available (Windows), `manage` the printer
+ * settings page.
+ */
+export async function openPrinterSettings(
+  mode: 'add' | 'manage' = 'add'
+): Promise<{ success: boolean; error?: string }> {
+  if (!isTauri()) {
+    return { success: false, error: 'Printer setup is only available in the desktop app' };
+  }
+  try {
+    const invoke = await getTauriInvoke();
+    await invoke('open_printer_settings', { mode });
+    return { success: true };
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
