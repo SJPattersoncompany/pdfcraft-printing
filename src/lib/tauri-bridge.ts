@@ -402,13 +402,20 @@ function baseName(path: string): string {
  * Takes the PDFs waiting to be opened and reads them into File objects.
  * Files that can no longer be read are reported in `errors`.
  */
-function toBlobPart(data: unknown): BlobPart | null {
-  if (data instanceof ArrayBuffer) return data;
-  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-  if (Array.isArray(data) && data.every((n) => typeof n === 'number')) {
-    return new Uint8Array(data);
+function copyToArrayBuffer(data: unknown): ArrayBuffer | null {
+  // Copy into a fresh ArrayBuffer. A Uint8Array view is not a BlobPart under
+  // current DOM types when its buffer is ArrayBufferLike.
+  if (data instanceof ArrayBuffer) return data.slice(0);
+  let source: Uint8Array | null = null;
+  if (ArrayBuffer.isView(data)) {
+    source = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  } else if (Array.isArray(data) && data.every((n) => typeof n === 'number')) {
+    source = Uint8Array.from(data);
   }
-  return null;
+  if (!source) return null;
+  const copy = new ArrayBuffer(source.byteLength);
+  new Uint8Array(copy).set(source);
+  return copy;
 }
 
 export async function takeOpenedFiles(): Promise<{ files: File[]; errors: string[] }> {
@@ -420,7 +427,7 @@ export async function takeOpenedFiles(): Promise<{ files: File[]; errors: string
   for (const path of batch.paths ?? []) {
     try {
       const data = await invoke<unknown>('read_file_binary', { path });
-      const bytes = toBlobPart(data);
+      const bytes = copyToArrayBuffer(data);
       if (!bytes) {
         errors.push(`Could not read "${baseName(path)}".`);
         continue;
