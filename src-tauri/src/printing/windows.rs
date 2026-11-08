@@ -4,9 +4,11 @@
 //! (`Windows.Data.Pdf`) and drawn onto a GDI printer device context, so printing works
 //! no matter which application is registered as the default PDF viewer.
 
-use super::layout::{parse_bmp, place_page, Caps};
-use super::{PrintOptions, SystemPrinter};
-use std::os::windows::process::CommandExt;
+use super::layout::{
+    apply_orientation, gdi_compatible_dib, place_page, printer_enum_count, stretch_dibits_failed,
+    Caps,
+};
+use super::{PrintOptions, ShellReport, SystemPrinter};
 use std::path::Path;
 
 use windows::core::{HSTRING, PCWSTR, PWSTR};
@@ -29,7 +31,6 @@ use windows::Win32::Graphics::Printing::{
 use windows::Win32::Storage::Xps::{AbortDoc, EndDoc, EndPage, StartDocW, StartPage, DOCINFOW};
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Render resolution cap. 300 dpi is plenty for text, sketches and photos and keeps a
 /// Letter page at ~25 MB of pixels.
 const MAX_RENDER_DPI: f64 = 300.0;
@@ -77,10 +78,16 @@ pub fn list_printers() -> Result<Vec<SystemPrinter>, String> {
         let mut returned: u32 = 0;
         let _ = EnumPrintersW(flags, PCWSTR::null(), 4, None, &mut needed, &mut returned);
         if needed > 0 {
+            let record_size = std::mem::size_of::<PRINTER_INFO_4W>();
+            // Refuse a huge or inconsistent count before any pointer is formed from it.
+            printer_enum_count(needed, 0, record_size)?;
+            let buffer_bytes = needed;
             // u64 storage keeps the PRINTER_INFO_4W array pointer-aligned.
-            let mut storage = vec![0u64; (needed as usize).div_ceil(8)];
-            let bytes =
-                std::slice::from_raw_parts_mut(storage.as_mut_ptr() as *mut u8, needed as usize);
+            let mut storage = vec![0u64; (buffer_bytes as usize).div_ceil(8)];
+            let bytes = std::slice::from_raw_parts_mut(
+                storage.as_mut_ptr() as *mut u8,
+                buffer_bytes as usize,
+            );
             EnumPrintersW(
                 flags,
                 PCWSTR::null(),
@@ -90,10 +97,9 @@ pub fn list_printers() -> Result<Vec<SystemPrinter>, String> {
                 &mut returned,
             )
             .map_err(|e| win_err("Could not list printers", e))?;
-            let infos = std::slice::from_raw_parts(
-                storage.as_ptr() as *const PRINTER_INFO_4W,
-                returned as usize,
-            );
+            let count = printer_enum_count(buffer_bytes, returned, record_size)?;
+            let infos =
+                std::slice::from_raw_parts(storage.as_ptr() as *const PRINTER_INFO_4W, count);
             for info in infos {
                 if info.pPrinterName.is_null() {
                     continue;
@@ -206,29 +212,26 @@ fn load_devmode(printer: &[u16]) -> Option<DevMode> {
     }
 }
 
-/// One rendered page, ready for `StretchDIBits`.
+/// One rendered page, ready for `StretchDIBits` as 24 bpp BI_RGB (no alpha byte).
 struct PageBitmap {
     header: BITMAPINFOHEADER,
-    data: Vec<u8>,
-    pixels_offset: usize,
+    pixels: Vec<u8>,
 }
 impl PageBitmap {
     fn from_bmp(data: Vec<u8>) -> Result<Self, String> {
-        let info = parse_bmp(&data)?;
-        // A plain BITMAPINFOHEADER is rebuilt so GDI never sees a V5 header with alpha.
+        let dib = gdi_compatible_dib(&data)?;
         let header = BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: info.width,
-            biHeight: info.height,
+            biWidth: dib.width,
+            biHeight: dib.height,
             biPlanes: 1,
-            biBitCount: info.bpp,
+            biBitCount: 24,
             biCompression: BI_RGB.0,
             ..Default::default()
         };
         Ok(Self {
             header,
-            data,
-            pixels_offset: info.pixels_offset,
+            pixels: dib.pixels,
         })
     }
     fn width(&self) -> i32 {
@@ -376,14 +379,17 @@ fn native_print(path: &Path, options: &PrintOptions) -> Result<(), String> {
                 let landscape = page_w_in > page_h_in;
 
                 // Turn the paper for landscape pages (maps, sketches, photo pages).
+                // ResetDCW returns NULL on failure. Recording the turn anyway places
+                // the next pages for a sheet the driver did not rotate.
                 if landscape != landscape_now {
-                    if let Some(dm) = devmode.as_mut() {
+                    let reset_ok = if let Some(dm) = devmode.as_mut() {
                         dm.set_orientation(landscape);
-                        unsafe {
-                            ResetDCW(dc.0, dm.ptr());
-                        }
-                    }
-                    landscape_now = landscape;
+                        let reset = unsafe { ResetDCW(dc.0, dm.ptr()) };
+                        !reset.is_invalid()
+                    } else {
+                        false
+                    };
+                    landscape_now = apply_orientation(landscape_now, landscape, reset_ok)?;
                 }
 
                 if unsafe { StartPage(dc.0) } <= 0 {
@@ -404,13 +410,14 @@ fn native_print(path: &Path, options: &PrintOptions) -> Result<(), String> {
                         0,
                         bmp.width(),
                         bmp.height(),
-                        Some(bmp.data[bmp.pixels_offset..].as_ptr() as *const _),
+                        Some(bmp.pixels.as_ptr() as *const _),
                         &bmp.header as *const BITMAPINFOHEADER as *const BITMAPINFO,
                         DIB_RGB_COLORS,
                         SRCCOPY,
                     )
                 };
-                if drawn == 0 {
+                // GDI_ERROR is -1. Treating only 0 as failure reports a blank job as sent.
+                if stretch_dibits_failed(drawn) {
                     unsafe { EndPage(dc.0) };
                     return Err(format!("Could not send page {} to the printer", index + 1));
                 }
@@ -444,46 +451,13 @@ fn native_print(path: &Path, options: &PrintOptions) -> Result<(), String> {
     result
 }
 
-/// Last resort: ask the default PDF application to print (the pre-fix behaviour).
-fn shell_print(path: &Path, printer: Option<&str>) -> Result<(), String> {
-    let file = path.to_string_lossy().replace('\'', "''");
-    let script = match printer {
-        Some(p) => format!(
-            "Start-Process -FilePath '{file}' -Verb PrintTo -ArgumentList '\"{}\"'",
-            p.replace('\'', "''")
-        ),
-        None => format!("Start-Process -FilePath '{file}' -Verb Print"),
-    };
-    let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
-
 pub fn print_pdf(path: &Path, options: &PrintOptions) -> Result<(), String> {
-    match native_print(path, options) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(path);
-            Ok(())
-        }
-        Err(native_err) => {
-            // Only fall back when a single plain copy was asked for; the shell route cannot
-            // honour copies or duplex. The temp file is left for the external app to read.
-            if options.copies == 1 && !options.duplex {
-                if shell_print(path, options.printer_name.as_deref()).is_ok() {
-                    return Ok(());
-                }
-            }
-            let _ = std::fs::remove_file(path);
-            Err(native_err)
-        }
-    }
+    let native = native_print(path, options);
+    // Do not ask the default PDF app to print. `Start-Process -Verb PrintTo` can exit 0
+    // when nothing was spooled (the failure in #140 and #235), and the temp PDF would
+    // have to be left behind for that process to read. The native error is returned
+    // and the temp file is always removed.
+    super::settle_print_file(path, native, ShellReport::NotUsed)
 }
 
 // ---------------------------------------------------------------------------------------

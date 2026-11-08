@@ -79,6 +79,182 @@ pub fn place_page(page_w_in: f64, page_h_in: f64, c: &Caps) -> (i32, i32, i32, i
     (x, y, w, h)
 }
 
+/// `StretchDIBits` returns the number of scan lines copied, or `GDI_ERROR` (`-1`).
+/// Zero and every negative value are failures. A check of `== 0` misses `GDI_ERROR`.
+pub fn stretch_dibits_failed(scan_lines: i32) -> bool {
+    scan_lines <= 0
+}
+
+/// Cap for one `EnumPrintersW` buffer. A spooler that asks for more is refused
+/// instead of allocating an unbounded block.
+pub const MAX_PRINTER_ENUM_BYTES: u32 = 16 * 1024 * 1024;
+
+/// How many `PRINTER_INFO_*` records may be read from an enumeration buffer.
+/// `returned` larger than the buffer is an error: slicing that far would read
+/// off the end of the allocation.
+pub fn printer_enum_count(
+    buffer_bytes: u32,
+    returned: u32,
+    record_size: usize,
+) -> Result<usize, String> {
+    if record_size == 0 {
+        return Err("Could not list printers: invalid record size".into());
+    }
+    if buffer_bytes > MAX_PRINTER_ENUM_BYTES {
+        return Err("Could not list printers: the list from Windows was unexpectedly large".into());
+    }
+    let max = (buffer_bytes as usize) / record_size;
+    let count = returned as usize;
+    if count > max {
+        return Err("Could not list printers: the list from Windows did not fit its buffer".into());
+    }
+    Ok(count)
+}
+
+/// Paper orientation after `ResetDCW`. A failed reset must not be recorded as
+/// the new orientation, or later pages are placed for a sheet that did not turn.
+pub fn apply_orientation(
+    current_landscape: bool,
+    requested_landscape: bool,
+    reset_succeeded: bool,
+) -> Result<bool, String> {
+    if requested_landscape == current_landscape {
+        return Ok(current_landscape);
+    }
+    if !reset_succeeded {
+        return Err("The printer could not turn the page for this sheet.".into());
+    }
+    Ok(requested_landscape)
+}
+
+/// 24 bpp `BI_RGB` pixels for GDI. Windows.Data.Pdf's BMP encoder writes 32 bpp
+/// with an alpha byte. Some printer drivers treat that byte as alpha and draw a
+/// blank page when it is zero. The alpha byte is dropped; the color bytes are kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GdiDib {
+    pub width: i32,
+    pub height: i32,
+    pub pixels: Vec<u8>,
+}
+
+pub fn gdi_compatible_dib(data: &[u8]) -> Result<GdiDib, String> {
+    let info = parse_bmp(data)?;
+    let header_size = read_u32(data, 14)?;
+    if header_size < 40 {
+        return Err("Page rendering produced an invalid bitmap".into());
+    }
+    let compression = read_u32(data, 30)?;
+    let rows = info.height.unsigned_abs() as usize;
+    let src_stride = (info.width as usize * info.bpp as usize).div_ceil(32) * 4;
+    let dst_stride = (info.width as usize)
+        .checked_mul(3)
+        .map(|n| n.div_ceil(4) * 4)
+        .ok_or("Page bitmap is too large")?;
+    let dst_len = dst_stride
+        .checked_mul(rows)
+        .ok_or("Page bitmap is too large")?;
+    let mut pixels = vec![0u8; dst_len];
+
+    if info.bpp == 24 {
+        if compression != 0 {
+            return Err("Unsupported 24 bpp page bitmap".into());
+        }
+        let row_bytes = (info.width as usize)
+            .checked_mul(3)
+            .ok_or("Page bitmap is too large")?;
+        for row in 0..rows {
+            let src = info
+                .pixels_offset
+                .checked_add(row * src_stride)
+                .ok_or("Page bitmap is truncated")?;
+            let src_end = src
+                .checked_add(row_bytes)
+                .ok_or("Page bitmap is truncated")?;
+            let row_px = data.get(src..src_end).ok_or("Page bitmap is truncated")?;
+            let dst = row * dst_stride;
+            pixels
+                .get_mut(dst..dst + row_bytes)
+                .ok_or("Page bitmap is too large")?
+                .copy_from_slice(row_px);
+        }
+    } else {
+        let (b_mask, g_mask, r_mask) =
+            rgb_masks(data, header_size, compression, info.pixels_offset)?;
+        let b_shift = mask_shift(b_mask)?;
+        let g_shift = mask_shift(g_mask)?;
+        let r_shift = mask_shift(r_mask)?;
+        for row in 0..rows {
+            let src = info
+                .pixels_offset
+                .checked_add(row * src_stride)
+                .ok_or("Page bitmap is truncated")?;
+            for x in 0..info.width as usize {
+                let i = src.checked_add(x * 4).ok_or("Page bitmap is truncated")?;
+                let px_bytes = data.get(i..i + 4).ok_or("Page bitmap is truncated")?;
+                let mut raw = [0u8; 4];
+                raw.copy_from_slice(px_bytes);
+                let px = u32::from_le_bytes(raw);
+                let o = row * dst_stride + x * 3;
+                let dest = pixels.get_mut(o..o + 3).ok_or("Page bitmap is too large")?;
+                dest[0] = ((px & b_mask) >> b_shift) as u8;
+                dest[1] = ((px & g_mask) >> g_shift) as u8;
+                dest[2] = ((px & r_mask) >> r_shift) as u8;
+            }
+        }
+    }
+
+    Ok(GdiDib {
+        width: info.width,
+        height: info.height,
+        pixels,
+    })
+}
+
+fn read_u32(data: &[u8], offset: usize) -> Result<u32, String> {
+    let bytes = data
+        .get(offset..offset + 4)
+        .ok_or("Page bitmap is truncated")?;
+    let mut raw = [0u8; 4];
+    raw.copy_from_slice(bytes);
+    Ok(u32::from_le_bytes(raw))
+}
+
+/// Blue, green, and red masks. `BI_RGB` 32 bpp is B, G, R in the low three bytes.
+/// `BI_BITFIELDS` stores red, green, blue masks after the info header (or inside a V4/V5 header).
+fn rgb_masks(
+    data: &[u8],
+    header_size: u32,
+    compression: u32,
+    pixels_offset: usize,
+) -> Result<(u32, u32, u32), String> {
+    if compression == 0 {
+        return Ok((0x0000_00FF, 0x0000_FF00, 0x00FF_0000));
+    }
+    if compression != 3 {
+        return Err(format!("Unsupported page bitmap compression {compression}"));
+    }
+    let mask_at = if header_size >= 108 {
+        14 + 40
+    } else {
+        14 + header_size as usize
+    };
+    if pixels_offset < mask_at + 12 {
+        return Err("Page bitmap color masks overlap the pixels".into());
+    }
+    let red = read_u32(data, mask_at)?;
+    let green = read_u32(data, mask_at + 4)?;
+    let blue = read_u32(data, mask_at + 8)?;
+    Ok((blue, green, red))
+}
+
+fn mask_shift(mask: u32) -> Result<u32, String> {
+    let shift = mask.trailing_zeros();
+    if mask == 0 || (mask >> shift) != 0xFF {
+        return Err(format!("Unsupported page bitmap channel mask {mask:#x}"));
+    }
+    Ok(shift)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +327,66 @@ mod tests {
         let (x, y, w, h) = place_page(4.0, 6.0, &letter_600());
         assert_eq!((w, h), (2400, 3600));
         assert_eq!((x + 150, y + 150), ((5100 - 2400) / 2, (6600 - 3600) / 2));
+    }
+
+    #[test]
+    fn stretch_failure_includes_gdi_error() {
+        assert!(stretch_dibits_failed(0));
+        assert!(stretch_dibits_failed(-1));
+        assert!(!stretch_dibits_failed(1));
+        assert!(!stretch_dibits_failed(3300));
+    }
+
+    #[test]
+    fn printer_enum_count_rejects_a_count_past_the_buffer() {
+        assert_eq!(printer_enum_count(32, 2, 16).unwrap(), 2);
+        assert_eq!(printer_enum_count(16, 0, 16).unwrap(), 0);
+        assert!(printer_enum_count(32, 3, 16).is_err());
+        assert!(printer_enum_count(15, 1, 16).is_err());
+        assert!(printer_enum_count(MAX_PRINTER_ENUM_BYTES + 1, 0, 16).is_err());
+    }
+
+    #[test]
+    fn failed_orientation_reset_is_not_stored() {
+        assert_eq!(apply_orientation(false, false, false).unwrap(), false);
+        assert_eq!(apply_orientation(true, true, false).unwrap(), true);
+        assert_eq!(apply_orientation(false, true, true).unwrap(), true);
+        assert!(apply_orientation(false, true, false).is_err());
+        assert!(apply_orientation(true, false, false).is_err());
+    }
+
+    #[test]
+    fn thirty_two_bpp_keeps_color_when_alpha_is_zero() {
+        // B, G, R, A. Alpha 0 must not blank the pixel.
+        let mut file = bmp(2, 1, 32, 0);
+        let px = file.len() - 8;
+        file[px..px + 8].copy_from_slice(&[10, 20, 30, 0, 1, 2, 3, 0]);
+        let dib = gdi_compatible_dib(&file).unwrap();
+        assert_eq!(dib.height, 1);
+        assert_eq!(&dib.pixels[..6], &[10, 20, 30, 1, 2, 3]);
+        assert_eq!(dib.pixels.len(), 8); // 6 color bytes, padded to a DWORD
+    }
+
+    #[test]
+    fn bitfields_masks_are_honored() {
+        // Red in the low byte, unlike the usual BGRA layout.
+        let width = 1i32;
+        let stride = 4usize;
+        let offset = 66usize;
+        let mut file = vec![0u8; offset + stride];
+        file[0] = b'B';
+        file[1] = b'M';
+        file[10..14].copy_from_slice(&(offset as u32).to_le_bytes());
+        file[14..18].copy_from_slice(&40u32.to_le_bytes());
+        file[18..22].copy_from_slice(&width.to_le_bytes());
+        file[22..26].copy_from_slice(&1i32.to_le_bytes());
+        file[28..30].copy_from_slice(&32u16.to_le_bytes());
+        file[30..34].copy_from_slice(&3u32.to_le_bytes());
+        file[54..58].copy_from_slice(&0x0000_00FFu32.to_le_bytes()); // red
+        file[58..62].copy_from_slice(&0x0000_FF00u32.to_le_bytes()); // green
+        file[62..66].copy_from_slice(&0x00FF_0000u32.to_le_bytes()); // blue
+        file[offset] = 255; // red channel, alpha in the high byte is 0
+        let dib = gdi_compatible_dib(&file).unwrap();
+        assert_eq!(&dib.pixels[..3], &[0, 0, 255]);
     }
 }
