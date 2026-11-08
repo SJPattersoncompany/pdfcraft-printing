@@ -224,8 +224,8 @@ fn main() {
         // Must be the first plugin: a second launch (e.g. double-clicking another PDF)
         // hands its files to this window and exits instead of opening a new window.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-            let files = file_open::pdf_paths_from_args(argv, std::path::Path::new(&cwd));
-            file_open::queue(app, files);
+            let parsed = file_open::parse_launch_args(argv, std::path::Path::new(&cwd));
+            file_open::queue(app, parsed);
             file_open::focus_main_window(app);
         }))
         .manage(file_open::OpenedFiles::default())
@@ -246,10 +246,11 @@ fn main() {
         )
         .setup(move |app| {
             // PDFs passed to this first launch ("Open with", double-click).
+            // Queued before the window loads so the page can take them when it is ready.
             let cwd = env::current_dir().unwrap_or_default();
             file_open::queue(
                 app.handle(),
-                file_open::pdf_paths_from_args(env::args(), &cwd),
+                file_open::parse_launch_args(env::args_os(), &cwd),
             );
 
             if use_loopback {
@@ -289,17 +290,26 @@ fn main() {
             // macOS delivers files opened from Finder as an event, not as arguments.
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             if let tauri::RunEvent::Opened { urls } = &_event {
-                let files: Vec<String> = urls
-                    .iter()
-                    .filter_map(|u| u.to_file_path().ok())
-                    .filter(|p| {
-                        p.extension()
-                            .map(|e| e.eq_ignore_ascii_case("pdf"))
-                            .unwrap_or(false)
-                    })
-                    .map(|p| p.display().to_string())
-                    .collect();
-                file_open::queue(_app, files);
+                let mut parsed = file_open::ParsedArgs {
+                    paths: Vec::new(),
+                    errors: Vec::new(),
+                };
+                for url in urls {
+                    match url.to_file_path() {
+                        Ok(path) => match file_open::accept_local_pdf(&path) {
+                            Ok(canonical) => {
+                                if !parsed.paths.contains(&canonical) {
+                                    parsed.paths.push(canonical);
+                                }
+                            }
+                            Err(error) => parsed.errors.push(error),
+                        },
+                        Err(_) => parsed
+                            .errors
+                            .push(format!("Could not open \"{url}\" as a local file.")),
+                    }
+                }
+                file_open::queue(_app, parsed);
                 file_open::focus_main_window(_app);
             }
         });

@@ -394,10 +394,16 @@ export const PDFStudio: React.FC<PDFStudioProps> = ({
       }
     };
 
-    openPending();
+    // Listen first, then drain the queue. A second launch can land between those two
+    // steps; draining again after the listener is attached picks that file up.
+    void openPending();
     onFilesOpened(openPending).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
+      if (disposed) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+      void openPending();
     });
     return () => {
       disposed = true;

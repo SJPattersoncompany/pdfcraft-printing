@@ -22,15 +22,25 @@ export function DesktopFileOpenHandler({ locale }: { locale: string }) {
 
     const goToStudio = async () => {
       if (pathnameRef.current?.includes('/studio')) return; // Studio picks the files up itself
-      if (await hasOpenedFiles()) {
-        router.push(`/${locale}/studio/`);
+      if (!(await hasOpenedFiles())) return;
+      // Leaving a tool page unmounts it. Confirm so unsaved tool work is not dropped silently.
+      if (pathnameRef.current?.includes('/tools/')) {
+        const leave = window.confirm(
+          'Open this PDF in Studio? This tool page will close, and unsaved work on it will be lost. Cancel to stay here; the file opens the next time you go to Studio.'
+        );
+        if (!leave) return;
       }
+      router.push(`/${locale}/studio/`);
     };
 
-    goToStudio();
+    // Listen first, then drain, so a file that arrives while the page is loading is not missed.
     onFilesOpened(goToStudio).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
+      if (disposed) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+      void goToStudio();
     });
     return () => {
       disposed = true;

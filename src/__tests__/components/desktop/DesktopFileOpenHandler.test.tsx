@@ -27,6 +27,7 @@ describe('DesktopFileOpenHandler', () => {
     push.mockClear();
     handler = undefined;
     pathname = '/en/tools/pdf-reader/';
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
   });
   afterEach(() => cleanup());
 
@@ -43,6 +44,22 @@ describe('DesktopFileOpenHandler', () => {
     expect(push).not.toHaveBeenCalled();
     await act(async () => handler?.());
     await waitFor(() => expect(push).toHaveBeenCalledWith('/en/studio/'));
+  });
+
+  it('does not leave a tool page when the user cancels', async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    vi.mocked(bridge.hasOpenedFiles).mockResolvedValue(true);
+    render(<DesktopFileOpenHandler locale="en" />);
+    await waitFor(() => expect(window.confirm).toHaveBeenCalled());
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it('opens Studio from a non-tool page without a confirmation', async () => {
+    pathname = '/en/';
+    vi.mocked(bridge.hasOpenedFiles).mockResolvedValue(true);
+    render(<DesktopFileOpenHandler locale="en" />);
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/en/studio/'));
+    expect(window.confirm).not.toHaveBeenCalled();
   });
 
   it('stays put when already in Studio (Studio opens the tabs itself)', async () => {

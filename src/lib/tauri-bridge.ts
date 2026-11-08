@@ -402,16 +402,30 @@ function baseName(path: string): string {
  * Takes the PDFs waiting to be opened and reads them into File objects.
  * Files that can no longer be read are reported in `errors`.
  */
+function toBlobPart(data: unknown): BlobPart | null {
+  if (data instanceof ArrayBuffer) return data;
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  if (Array.isArray(data) && data.every((n) => typeof n === 'number')) {
+    return new Uint8Array(data);
+  }
+  return null;
+}
+
 export async function takeOpenedFiles(): Promise<{ files: File[]; errors: string[] }> {
   if (!isTauri()) return { files: [], errors: [] };
   const invoke = await getTauriInvoke();
-  const paths = await invoke<string[]>('take_opened_files');
+  const batch = await invoke<{ paths?: string[]; errors?: string[] }>('take_opened_files');
   const files: File[] = [];
-  const errors: string[] = [];
-  for (const path of paths) {
+  const errors: string[] = [...(batch.errors ?? [])];
+  for (const path of batch.paths ?? []) {
     try {
-      const data = await invoke<ArrayBuffer>('read_file_binary', { path });
-      files.push(new File([data], baseName(path), { type: 'application/pdf' }));
+      const data = await invoke<unknown>('read_file_binary', { path });
+      const bytes = toBlobPart(data);
+      if (!bytes) {
+        errors.push(`Could not read "${baseName(path)}".`);
+        continue;
+      }
+      files.push(new File([bytes], baseName(path), { type: 'application/pdf' }));
     } catch (err) {
       errors.push(err instanceof Error ? err.message : String(err));
     }

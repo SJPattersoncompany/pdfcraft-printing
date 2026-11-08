@@ -52,7 +52,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="v$(date +'%Y.%m.%d')-$(git rev-parse --short HEAD)-print-test"
+          VERSION="v$(date +'%Y.%m.%d')-$(git rev-parse --short HEAD)-print-open-test"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build frontend
@@ -60,6 +60,9 @@ jobs:
         env:
           TAURI_ENV: "true"
           APP_VERSION: ${{ steps.version.outputs.version }}
+          # Desktop startup otherwise force-checks PDFCraftTool/pdfcraft and can
+          # offer that official installer. This test build must not do that.
+          DISABLE_UPDATE_CHECK: "true"
 
       - name: Build unofficial Windows installer
         uses: nick-fields/retry@v3
@@ -82,7 +85,7 @@ jobs:
       - name: Upload unofficial Windows x64 installer
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x64-unofficial-print-test
+          name: windows-x64-unofficial-print-open-test
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle/UNOFFICIAL-TEST-BUILD.txt

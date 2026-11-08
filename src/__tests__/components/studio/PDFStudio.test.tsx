@@ -1297,15 +1297,15 @@ describe('PDFStudio Component', () => {
         filesOpenedHandler = handler;
         return () => {};
       });
-      vi.mocked(bridge.takeOpenedFiles)
-        .mockResolvedValueOnce({
+      const queued: { files: File[]; errors: string[] }[] = [
+        {
           files: [new File(['%PDF'], '123 Main St Appraisal.pdf', { type: 'application/pdf' })],
           errors: [],
-        })
-        .mockResolvedValueOnce({
-          files: [new File(['%PDF'], '456 Oak Ave Comps.pdf', { type: 'application/pdf' })],
-          errors: [],
-        });
+        },
+      ];
+      vi.mocked(bridge.takeOpenedFiles).mockImplementation(async () => {
+        return queued.shift() ?? { files: [], errors: [] };
+      });
 
       render(<PDFStudio locale="en" />);
 
@@ -1315,6 +1315,10 @@ describe('PDFStudio Component', () => {
       expect(filesOpenedHandler).toBeDefined();
 
       // A second launch (double-clicking another PDF) signals the running window.
+      queued.push({
+        files: [new File(['%PDF'], '456 Oak Ave Comps.pdf', { type: 'application/pdf' })],
+        errors: [],
+      });
       await act(async () => {
         filesOpenedHandler?.();
       });

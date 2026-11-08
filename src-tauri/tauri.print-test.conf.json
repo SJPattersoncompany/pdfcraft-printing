@@ -1,7 +1,30 @@
 {
   "productName": "PDFCraft Print Test",
   "identifier": "com.pdfcraft.printtest",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "PDFCraft Print Test (unofficial)",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "dragDropEnabled": false
+      }
+    ]
+  },
   "bundle": {
-    "targets": ["msi", "nsis"]
+    "targets": ["msi", "nsis"],
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "name": "PDFCraftPrintTest.PDF",
+        "description": "Unofficial PDFCraft print-test PDF",
+        "mimeType": "application/pdf",
+        "role": "Viewer"
+      }
+    ]
   }
 }
