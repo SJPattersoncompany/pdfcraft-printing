@@ -1,0 +1,7 @@
+{
+  "productName": "PDFCraft Print Test",
+  "identifier": "com.pdfcraft.printtest",
+  "bundle": {
+    "targets": ["msi", "nsis"]
+  }
+}
