@@ -2,10 +2,12 @@
 
 mod file_open;
 mod printing;
+mod window_placement;
 
 use serde::Deserialize;
 use std::env;
 use std::fs;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 #[derive(Debug, Deserialize)]
@@ -266,7 +268,17 @@ fn main() {
                         .parse()
                         .expect("loopback url is valid"),
                 );
-                tauri::WebviewWindowBuilder::from_config(app, &window_config)?.build()?;
+                // Hidden, and with a real position, until `window_placement` sizes it.
+                // `CW_USEDEFAULT` is what tao uses when no position is set, and Windows
+                // only honors that for the first overlapped window — which the
+                // single-instance plugin already created at 0×0.
+                let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?
+                    .visible(false)
+                    .position(0.0, 0.0)
+                    .build()?;
+                window_placement::on_launch(&window);
+            } else if let Some(window) = app.get_webview_window("main") {
+                window_placement::on_launch(&window);
             }
             Ok(())
         })

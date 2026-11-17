@@ -185,14 +185,11 @@ pub fn queue<R: Runtime>(app: &AppHandle<R>, parsed: ParsedArgs) {
     let _ = app.emit(FILES_OPENED_EVENT, ());
 }
 
-/// Brings the main window to the front (restoring it if minimised).
+/// Brings the main window forward. A minimized window is restored to its last
+/// normal size (never maximized); a tiny or off-screen rect is replaced.
 pub fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        if window.set_focus().is_err() {
-            let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
-        }
+        crate::window_placement::on_second_instance(&window);
     }
 }
 
@@ -266,7 +263,9 @@ pub fn authorize_read(path: &str, allowed: &HashSet<String>) -> Result<PathBuf, 
     }
     let canonical = display_canonical(&raw);
     let raw_display = raw.display().to_string();
-    if !allowed.contains(&canonical) && !allowed.contains(trimmed) && !allowed.contains(&raw_display)
+    if !allowed.contains(&canonical)
+        && !allowed.contains(trimmed)
+        && !allowed.contains(&raw_display)
     {
         return Err("That file was not opened from this app.".into());
     }
@@ -355,7 +354,10 @@ mod tests {
         );
         assert!(parsed.paths.is_empty(), "{parsed:?}");
         assert!(
-            parsed.errors.iter().any(|e| e.contains("notes.txt") && e.contains("Not a PDF")),
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.contains("notes.txt") && e.contains("Not a PDF")),
             "{parsed:?}"
         );
         assert!(
