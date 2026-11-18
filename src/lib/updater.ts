@@ -378,7 +378,10 @@ export async function checkUpdate(
   const currentVersion = DEFAULT_CURRENT_VERSION;
   const shouldBypassInterval = Boolean(options.force || options.isDesktop);
 
-  if (process.env.NEXT_PUBLIC_DISABLE_UPDATE_CHECK === 'true' && !options.force) {
+  // Hard off-switch. Desktop startup passes force:true, which used to ignore this
+  // flag and still query PDFCraftTool/pdfcraft. Unofficial print-test installers
+  // set the flag so they do not offer or download an official update.
+  if (process.env.NEXT_PUBLIC_DISABLE_UPDATE_CHECK === 'true') {
     return {
       hasUpdate: false,
       currentVersion,

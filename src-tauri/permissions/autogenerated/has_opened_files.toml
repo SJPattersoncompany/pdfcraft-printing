@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-has-opened-files"
+description = "Enables the has_opened_files command without any pre-configured scope."
+commands.allow = ["has_opened_files"]
+
+[[permission]]
+identifier = "deny-has-opened-files"
+description = "Denies the has_opened_files command without any pre-configured scope."
+commands.deny = ["has_opened_files"]

@@ -1,0 +1,549 @@
+//! Opening PDFs handed to the app by the operating system (double-click, "Open with",
+//! dragging onto the app icon, `pdfcraft file.pdf`).
+//!
+//! Only one window of this bundle runs at a time: when the app is launched again, the
+//! single-instance plugin forwards the new launch's arguments to the running instance,
+//! which queues the PDFs, brings its window to the front and tells the frontend, which
+//! opens each file as a new tab in Studio. The second process then exits.
+//!
+//! On Windows that forward arrives inside the plugin's `WM_COPYDATA` handler, on the
+//! UI thread. Window placement and the webview event have to be posted back to the
+//! event loop and run only after that handler returns. Doing them inline re-enters
+//! the main window procedure (`SetWindowPos` / `ShowWindow` / a webview eval) before
+//! the second process has finished handing off, and the shell ends up with a second
+//! top-level window instead of a tab.
+//! A different bundle id (the unofficial print-test build uses `com.pdfcraft.printtest`)
+//! is a different instance and does not attach to `com.pdfcraft.app`.
+//!
+//! Files are queued (rather than only sent as an event) so nothing is lost when they
+//! arrive before the page has finished loading — the page asks for the queue on start.
+//! `read_file_binary` can read only paths this process queued. It does not fetch URLs.
+
+use serde::Serialize;
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+
+/// Event emitted (no payload) whenever new files are queued.
+pub const FILES_OPENED_EVENT: &str = "pdfcraft://files-opened";
+
+#[derive(Default)]
+pub struct OpenedFiles {
+    pending_paths: Mutex<Vec<String>>,
+    pending_errors: Mutex<Vec<String>>,
+    /// Canonical paths the OS asked this process to open. IPC reads are limited to these.
+    allowed: Mutex<HashSet<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedArgs {
+    pub paths: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenedFileBatch {
+    pub paths: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+fn is_pdf(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false)
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Some(byte) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `file:///C:/x.pdf` -> `C:/x.pdf`. A leading slash before a drive letter is URL syntax,
+/// not a directory, so this is applied on every OS.
+pub fn file_url_to_path(arg: &str) -> Option<PathBuf> {
+    let rest = arg.strip_prefix("file://")?;
+    let mut path = percent_decode(rest);
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[2] == b':' {
+        path.remove(0);
+    }
+    Some(PathBuf::from(path))
+}
+
+fn display_canonical(path: &Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut s = path.display().to_string();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        if !stripped.starts_with("UNC\\") {
+            s = stripped.to_string();
+        }
+    }
+    s
+}
+
+fn classify_local_pdf(path: &Path) -> Result<String, String> {
+    let shown = path.display().to_string();
+    if !is_pdf(path) {
+        return Err(format!("Not a PDF: {shown}"));
+    }
+    if !path.is_file() {
+        return Err(format!("Could not find \"{shown}\"."));
+    }
+    Ok(display_canonical(path))
+}
+
+/// Picks PDF files out of a command line and reports the rest as errors.
+/// `args` includes the program path first, which is skipped. Flags are ignored.
+/// Relative paths are resolved against `cwd`. Duplicate paths in one launch are kept once.
+/// A later launch of the same path is not dropped: that is a separate call.
+pub fn parse_launch_args<I, S>(args: I, cwd: &Path) -> ParsedArgs
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut paths = Vec::new();
+    let mut errors = Vec::new();
+    for (index, arg) in args.into_iter().enumerate() {
+        if index == 0 {
+            continue;
+        }
+        let arg = arg.as_ref();
+        if arg.is_empty() {
+            continue;
+        }
+        let Some(text) = arg.to_str() else {
+            errors.push("A file name could not be read as text.".to_string());
+            continue;
+        };
+        if text.starts_with('-') {
+            continue;
+        }
+        if text.contains("://") && !text.starts_with("file://") {
+            errors.push(format!("Remote addresses are not opened: {text}"));
+            continue;
+        }
+        let path = file_url_to_path(text).unwrap_or_else(|| PathBuf::from(text));
+        let path = if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        };
+        match classify_local_pdf(&path) {
+            Ok(canonical) => {
+                if !paths.contains(&canonical) {
+                    paths.push(canonical);
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    ParsedArgs { paths, errors }
+}
+
+/// Paths only. Prefer [`parse_launch_args`] when the caller can show errors.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn pdf_paths_from_args<I>(args: I, cwd: &Path) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    parse_launch_args(args, cwd).paths
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+pub fn accept_local_pdf(path: &Path) -> Result<String, String> {
+    classify_local_pdf(path)
+}
+
+/// What a second OS launch must do. `defer_ui` is load-bearing on Windows: the
+/// plugin callback runs inside `WM_COPYDATA`, and the window / webview work has
+/// to happen on a later turn of the event loop.
+#[derive(Debug)]
+pub struct SecondInstancePlan {
+    pub parsed: ParsedArgs,
+    pub defer_ui: bool,
+}
+
+impl SecondInstancePlan {
+    pub fn notifies(&self) -> bool {
+        !self.parsed.paths.is_empty() || !self.parsed.errors.is_empty()
+    }
+}
+
+pub fn plan_second_instance<I, S>(argv: I, cwd: &Path) -> SecondInstancePlan
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    SecondInstancePlan {
+        parsed: parse_launch_args(argv, cwd),
+        defer_ui: true,
+    }
+}
+
+fn remember(state: &OpenedFiles, parsed: &ParsedArgs) -> bool {
+    if parsed.paths.is_empty() && parsed.errors.is_empty() {
+        return false;
+    }
+    if let Ok(mut allowed) = state.allowed.lock() {
+        allowed.extend(parsed.paths.iter().cloned());
+    }
+    if let Ok(mut pending) = state.pending_paths.lock() {
+        pending.extend(parsed.paths.iter().cloned());
+    }
+    if let Ok(mut pending) = state.pending_errors.lock() {
+        pending.extend(parsed.errors.iter().cloned());
+    }
+    true
+}
+
+fn drain(state: &OpenedFiles) -> OpenedFileBatch {
+    let paths = state
+        .pending_paths
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default();
+    let errors = state
+        .pending_errors
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default();
+    OpenedFileBatch { paths, errors }
+}
+
+/// Queues files for the frontend and notifies it. Empty input does not emit.
+pub fn queue<R: Runtime>(app: &AppHandle<R>, parsed: ParsedArgs) {
+    let notify = match app.try_state::<OpenedFiles>() {
+        Some(state) => remember(&state, &parsed),
+        None => !parsed.paths.is_empty() || !parsed.errors.is_empty(),
+    };
+    if notify {
+        let _ = app.emit(FILES_OPENED_EVENT, ());
+    }
+}
+
+/// Windows second launch. Stores paths immediately, then posts the tab event and
+/// the window restore. Nothing here may call into the window or the webview:
+/// the caller is the single-instance `WM_COPYDATA` handler.
+pub fn accept_windows_second_instance<R: Runtime>(
+    app: &AppHandle<R>,
+    argv: Vec<String>,
+    cwd: String,
+) {
+    let plan = plan_second_instance(argv, Path::new(&cwd));
+    let notify = match app.try_state::<OpenedFiles>() {
+        Some(state) => remember(&state, &plan.parsed),
+        None => plan.notifies(),
+    };
+    if plan.defer_ui {
+        schedule_second_instance_ui(app.clone(), notify);
+    } else {
+        deliver_second_instance_ui(app, notify);
+    }
+}
+
+fn schedule_second_instance_ui<R: Runtime>(app: AppHandle<R>, notify: bool) {
+    // `AppHandle::run_on_main_thread` runs the closure inline when it is already
+    // on the UI thread, which is exactly the WM_COPYDATA stack we have to leave.
+    // Posting from another thread goes through the event-loop queue
+    // (`PostMessage`) and runs only after this handler returns.
+    let spawned = std::thread::Builder::new()
+        .name("pdfcraft-second-instance".into())
+        .spawn(move || {
+            let posted = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                deliver_second_instance_ui(&posted, notify);
+            });
+        });
+    if spawned.is_err() {
+        eprintln!("pdfcraft: could not schedule the second-instance open");
+    }
+}
+
+fn deliver_second_instance_ui<R: Runtime>(app: &AppHandle<R>, notify: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        crate::window_placement::on_second_instance(&window);
+    }
+    if notify {
+        let _ = app.emit(FILES_OPENED_EVENT, ());
+    }
+}
+
+/// Brings the main window forward. A minimized window is restored to its last
+/// normal size (never maximized); a tiny or off-screen rect is replaced.
+///
+/// Not for the Windows single-instance callback; that path has to go through
+/// [`accept_windows_second_instance`] so the restore is not nested inside
+/// `WM_COPYDATA`. macOS file-open events are already on the event loop.
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+pub fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        crate::window_placement::on_second_instance(&window);
+    }
+}
+
+/// Returns and clears the queued file paths and parse errors.
+#[tauri::command]
+pub fn take_opened_files(state: tauri::State<'_, OpenedFiles>) -> OpenedFileBatch {
+    drain(&state)
+}
+
+/// True when files or errors are waiting (without taking them).
+#[tauri::command]
+pub fn has_opened_files(state: tauri::State<'_, OpenedFiles>) -> bool {
+    let paths = state
+        .pending_paths
+        .lock()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+    let errors = state
+        .pending_errors
+        .lock()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+    paths || errors
+}
+
+/// Reads a queued local PDF as a raw binary IPC response.
+/// Paths the OS did not hand to this process, URLs, and non-PDFs are refused.
+#[tauri::command]
+pub async fn read_file_binary(
+    state: tauri::State<'_, OpenedFiles>,
+    path: String,
+) -> Result<tauri::ipc::Response, String> {
+    let read_path = {
+        let allowed = state
+            .allowed
+            .lock()
+            .map_err(|_| "Could not read the opened-file list.".to_string())?;
+        authorize_read(&path, &allowed)?
+    };
+    tauri::async_runtime::spawn_blocking(move || std::fs::read(&read_path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| format!("Could not open \"{path}\": {e}"))
+}
+
+pub fn authorize_read(path: &str, allowed: &HashSet<String>) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("No file path was provided.".into());
+    }
+    if trimmed.contains("://") || trimmed.starts_with("file:") {
+        return Err("Only a local PDF that this app was asked to open can be read.".into());
+    }
+    let raw = PathBuf::from(trimmed);
+    if !is_pdf(&raw) {
+        return Err(format!("Not a PDF: {trimmed}"));
+    }
+    if !raw.is_file() {
+        return Err(format!("Could not find \"{trimmed}\"."));
+    }
+    let canonical = display_canonical(&raw);
+    let raw_display = raw.display().to_string();
+    if !allowed.contains(&canonical)
+        && !allowed.contains(trimmed)
+        && !allowed.contains(&raw_display)
+    {
+        return Err("That file was not opened from this app.".into());
+    }
+    Ok(PathBuf::from(canonical))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pdfcraft_args_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn picks_existing_pdfs_from_command_line() {
+        let dir = scratch();
+        std::fs::create_dir_all(dir.join("sub dir")).unwrap();
+        std::fs::write(dir.join("a.pdf"), b"%PDF").unwrap();
+        std::fs::write(dir.join("sub dir").join("B.PDF"), b"%PDF").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        let abs_b = dir.join("sub dir").join("B.PDF").display().to_string();
+
+        let args = vec![
+            "C:/Program Files/PDFCraft/pdfcraft.exe".to_string(),
+            "--flag".into(),
+            "a.pdf".into(),
+            abs_b.clone(),
+            "a.pdf".into(),
+            "notes.txt".into(),
+            "missing.pdf".into(),
+        ];
+        let found = pdf_paths_from_args(args, &dir);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].ends_with("a.pdf"), "{found:?}");
+        assert!(found[1].ends_with("B.PDF"), "{found:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn program_path_alone_opens_nothing() {
+        let args = vec!["pdfcraft".to_string()];
+        assert!(pdf_paths_from_args(args, Path::new("/")).is_empty());
+    }
+
+    #[test]
+    fn decodes_file_urls_with_spaces_unicode_and_drive_letters() {
+        assert_eq!(
+            file_url_to_path("file:///home/me/My%20Report.pdf"),
+            Some(PathBuf::from("/home/me/My Report.pdf"))
+        );
+        assert_eq!(
+            file_url_to_path("file:///tmp/%E6%8A%A5%E5%91%8A.pdf"),
+            Some(PathBuf::from("/tmp/报告.pdf"))
+        );
+        assert_eq!(
+            file_url_to_path("file:///C:/Users/Me/My%20Report.pdf"),
+            Some(PathBuf::from("C:/Users/Me/My Report.pdf"))
+        );
+        assert_eq!(file_url_to_path("/plain/path.pdf"), None);
+        assert_eq!(file_url_to_path("https://example.com/a.pdf"), None);
+    }
+
+    #[test]
+    fn reports_missing_non_pdf_and_remote_args() {
+        let dir = scratch();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        let parsed = parse_launch_args(
+            [
+                "pdfcraft",
+                "notes.txt",
+                "missing.pdf",
+                "https://example.com/secret.pdf",
+                "--ignored",
+            ],
+            &dir,
+        );
+        assert!(parsed.paths.is_empty(), "{parsed:?}");
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|e| e.contains("notes.txt") && e.contains("Not a PDF")),
+            "{parsed:?}"
+        );
+        assert!(
+            parsed.errors.iter().any(|e| e.contains("missing.pdf")),
+            "{parsed:?}"
+        );
+        assert!(
+            parsed.errors.iter().any(|e| e.contains("Remote addresses")),
+            "{parsed:?}"
+        );
+        assert!(!parsed.errors.iter().any(|e| e.contains("ignored")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn spaces_unicode_and_a_later_open_of_the_same_file() {
+        let dir = scratch();
+        let spaced = dir.join("My Report.pdf");
+        let unicode = dir.join("报告.pdf");
+        std::fs::write(&spaced, b"%PDF").unwrap();
+        std::fs::write(&unicode, b"%PDF").unwrap();
+        let first = parse_launch_args(
+            ["pdfcraft", "My Report.pdf", "报告.pdf", "My Report.pdf"],
+            &dir,
+        );
+        assert_eq!(first.paths.len(), 2, "{first:?}");
+        assert!(first.errors.is_empty(), "{first:?}");
+        assert!(first.paths.iter().any(|p| p.contains("My Report.pdf")));
+        assert!(first.paths.iter().any(|p| p.contains("报告.pdf")));
+        let again = parse_launch_args(["pdfcraft", "报告.pdf"], &dir);
+        assert_eq!(again.paths.len(), 1, "{again:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_is_limited_to_queued_local_pdfs() {
+        let dir = scratch();
+        let pdf = dir.join("queued.pdf");
+        let other = dir.join("other.pdf");
+        std::fs::write(&pdf, b"%PDF").unwrap();
+        std::fs::write(&other, b"%PDF").unwrap();
+        let queued = parse_launch_args(["pdfcraft", "queued.pdf"], &dir);
+        let allowed: HashSet<String> = queued.paths.iter().cloned().collect();
+        let ok = authorize_read(&queued.paths[0], &allowed).expect("queued pdf");
+        assert!(ok.ends_with("queued.pdf"));
+        assert!(authorize_read(&other.display().to_string(), &allowed).is_err());
+        assert!(authorize_read("https://example.com/queued.pdf", &allowed).is_err());
+        assert!(authorize_read("file:///tmp/queued.pdf", &allowed).is_err());
+        assert!(authorize_read("", &allowed).is_err());
+        assert!(authorize_read("notes.txt", &allowed).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Windows second launch must leave the PDF in the queue for Studio to
+    /// open as a tab, and it must not do that by touching the window inside
+    /// WM_COPYDATA (`defer_ui`). A later launch is another queued tab.
+    #[test]
+    fn second_instance_queues_a_tab_and_defers_the_window() {
+        let dir = scratch();
+        let first = dir.join("already-open.pdf");
+        let second = dir.join("from the shell.pdf");
+        std::fs::write(&first, b"%PDF").unwrap();
+        std::fs::write(&second, b"%PDF").unwrap();
+
+        let opened = plan_second_instance(["pdfcraft", "already-open.pdf"], &dir);
+        assert!(opened.defer_ui, "window work has to leave WM_COPYDATA");
+        assert!(opened.notifies(), "{opened:?}");
+        let state = OpenedFiles::default();
+        assert!(remember(&state, &opened.parsed));
+        let taken = drain(&state);
+        assert_eq!(taken.paths.len(), 1, "{taken:?}");
+        assert!(taken.paths[0].ends_with("already-open.pdf"), "{taken:?}");
+        assert!(taken.errors.is_empty(), "{taken:?}");
+
+        let again = plan_second_instance(["pdfcraft", "from the shell.pdf"], &dir);
+        assert!(again.defer_ui);
+        assert!(again.notifies());
+        assert!(remember(&state, &again.parsed));
+        let tab = drain(&state);
+        assert_eq!(tab.paths.len(), 1, "{tab:?}");
+        assert!(tab.paths[0].ends_with("from the shell.pdf"), "{tab:?}");
+        assert!(tab.errors.is_empty(), "{tab:?}");
+
+        let bare = plan_second_instance(["pdfcraft"], &dir);
+        assert!(bare.defer_ui);
+        assert!(!bare.notifies());
+        assert!(!remember(&state, &bare.parsed));
+        assert!(drain(&state).paths.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

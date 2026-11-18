@@ -187,5 +187,26 @@ describe('Software Updater', () => {
         }
       }
     });
+
+    it('does not query official releases when checks are disabled, even if forced on desktop', async () => {
+      const originalEnv = process.env.NEXT_PUBLIC_DISABLE_UPDATE_CHECK;
+      const fetchSpy = vi.fn();
+      const previousFetch = global.fetch;
+      try {
+        process.env.NEXT_PUBLIC_DISABLE_UPDATE_CHECK = 'true';
+        global.fetch = fetchSpy as unknown as typeof fetch;
+        const result = await checkUpdate({ force: true, isDesktop: true });
+        expect(result.hasUpdate).toBe(false);
+        expect(result.latestVersion).toBe(result.currentVersion);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        global.fetch = previousFetch;
+        if (originalEnv !== undefined) {
+          process.env.NEXT_PUBLIC_DISABLE_UPDATE_CHECK = originalEnv;
+        } else {
+          delete process.env.NEXT_PUBLIC_DISABLE_UPDATE_CHECK;
+        }
+      }
+    });
   });
 });

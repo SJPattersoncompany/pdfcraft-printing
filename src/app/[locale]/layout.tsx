@@ -5,6 +5,7 @@ import { notFound } from 'next/navigation';
 import { localeConfig, type Locale, locales } from '@/lib/i18n/config';
 import { fontVariablesFor } from '@/lib/fonts';
 import { SkipLink } from '@/components/common/SkipLink';
+import { DesktopFileOpenHandler } from '@/components/desktop/DesktopFileOpenHandler';
 import '@/app/globals.css';
 
 export function generateStaticParams() {
@@ -52,6 +53,7 @@ export default async function LocaleLayout({
     <NextIntlClientProvider messages={messages}>
       <div lang={locale} dir={direction} className={`${fontVariablesFor(direction)} min-h-screen bg-background text-foreground antialiased font-sans`}>
         <SkipLink targetId="main-content">Skip to main content</SkipLink>
+        <DesktopFileOpenHandler locale={locale} />
         {children}
       </div>
     </NextIntlClientProvider>

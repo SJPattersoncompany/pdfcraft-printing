@@ -2013,10 +2013,22 @@
           "markdownDescription": "Enables the get_temp_dir command without any pre-configured scope."
         },
         {
+          "description": "Enables the has_opened_files command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-has-opened-files",
+          "markdownDescription": "Enables the has_opened_files command without any pre-configured scope."
+        },
+        {
           "description": "Enables the open_files command without any pre-configured scope.",
           "type": "string",
           "const": "allow-open-files",
           "markdownDescription": "Enables the open_files command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_printer_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-printer-settings",
+          "markdownDescription": "Enables the open_printer_settings command without any pre-configured scope."
         },
         {
           "description": "Enables the open_url command without any pre-configured scope.",
@@ -2037,10 +2049,22 @@
           "markdownDescription": "Enables the read_file command without any pre-configured scope."
         },
         {
+          "description": "Enables the read_file_binary command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-read-file-binary",
+          "markdownDescription": "Enables the read_file_binary command without any pre-configured scope."
+        },
+        {
           "description": "Enables the save_file command without any pre-configured scope.",
           "type": "string",
           "const": "allow-save-file",
           "markdownDescription": "Enables the save_file command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the take_opened_files command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-take-opened-files",
+          "markdownDescription": "Enables the take_opened_files command without any pre-configured scope."
         },
         {
           "description": "Enables the write_file command without any pre-configured scope.",
@@ -2061,10 +2085,22 @@
           "markdownDescription": "Denies the get_temp_dir command without any pre-configured scope."
         },
         {
+          "description": "Denies the has_opened_files command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-has-opened-files",
+          "markdownDescription": "Denies the has_opened_files command without any pre-configured scope."
+        },
+        {
           "description": "Denies the open_files command without any pre-configured scope.",
           "type": "string",
           "const": "deny-open-files",
           "markdownDescription": "Denies the open_files command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_printer_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-printer-settings",
+          "markdownDescription": "Denies the open_printer_settings command without any pre-configured scope."
         },
         {
           "description": "Denies the open_url command without any pre-configured scope.",
@@ -2085,10 +2121,22 @@
           "markdownDescription": "Denies the read_file command without any pre-configured scope."
         },
         {
+          "description": "Denies the read_file_binary command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-read-file-binary",
+          "markdownDescription": "Denies the read_file_binary command without any pre-configured scope."
+        },
+        {
           "description": "Denies the save_file command without any pre-configured scope.",
           "type": "string",
           "const": "deny-save-file",
           "markdownDescription": "Denies the save_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the take_opened_files command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-take-opened-files",
+          "markdownDescription": "Denies the take_opened_files command without any pre-configured scope."
         },
         {
           "description": "Denies the write_file command without any pre-configured scope.",

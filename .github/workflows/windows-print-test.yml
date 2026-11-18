@@ -1,0 +1,94 @@
+# Unofficial Windows x64 installer for the printing patch.
+# This workflow only uploads an Actions artifact. It does not publish a release,
+# push a tag, or use signing secrets.
+name: Windows print test build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: windows-print-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: Unofficial Windows x64 installer
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_NET_RETRY: 10
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      CARGO_HTTP_MULTIPLEXING: false
+      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+      RUSTUP_MAX_RETRIES: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> src-tauri/target"
+
+      - name: Install Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Generate version info
+        id: version
+        shell: bash
+        run: |
+          VERSION="v$(date +'%Y.%m.%d')-$(git rev-parse --short HEAD)-print-open-test"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build frontend
+        run: npm run build
+        env:
+          TAURI_ENV: "true"
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          # Desktop startup otherwise force-checks PDFCraftTool/pdfcraft and can
+          # offer that official installer. This test build must not do that.
+          DISABLE_UPDATE_CHECK: "true"
+
+      - name: Build unofficial Windows installer
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 60
+          max_attempts: 2
+          retry_on: error
+          shell: bash
+          command: npx tauri build -v --ci --config src-tauri/tauri.ci.conf.json --config src-tauri/tauri.print-test.conf.json
+        env:
+          TAURI_ENV: "true"
+          RUST_BACKTRACE: "1"
+
+      - name: Label the artifact as an unofficial test build
+        shell: bash
+        run: |
+          mkdir -p src-tauri/target/release/bundle
+          cp src-tauri/UNOFFICIAL-TEST-BUILD.txt src-tauri/target/release/bundle/UNOFFICIAL-TEST-BUILD.txt
+
+      - name: Upload unofficial Windows x64 installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-unofficial-print-open-test
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/UNOFFICIAL-TEST-BUILD.txt
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.zip
