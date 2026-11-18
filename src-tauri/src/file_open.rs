@@ -5,6 +5,13 @@
 //! single-instance plugin forwards the new launch's arguments to the running instance,
 //! which queues the PDFs, brings its window to the front and tells the frontend, which
 //! opens each file as a new tab in Studio. The second process then exits.
+//!
+//! On Windows that forward arrives inside the plugin's `WM_COPYDATA` handler, on the
+//! UI thread. Window placement and the webview event have to be posted back to the
+//! event loop and run only after that handler returns. Doing them inline re-enters
+//! the main window procedure (`SetWindowPos` / `ShowWindow` / a webview eval) before
+//! the second process has finished handing off, and the shell ends up with a second
+//! top-level window instead of a tab.
 //! A different bundle id (the unofficial print-test build uses `com.pdfcraft.printtest`)
 //! is a different instance and does not attach to `com.pdfcraft.app`.
 //!
@@ -166,36 +173,49 @@ pub fn accept_local_pdf(path: &Path) -> Result<String, String> {
     classify_local_pdf(path)
 }
 
-/// Queues files for the frontend and notifies it. Empty input does not emit.
-pub fn queue<R: Runtime>(app: &AppHandle<R>, parsed: ParsedArgs) {
+/// What a second OS launch must do. `defer_ui` is load-bearing on Windows: the
+/// plugin callback runs inside `WM_COPYDATA`, and the window / webview work has
+/// to happen on a later turn of the event loop.
+#[derive(Debug)]
+pub struct SecondInstancePlan {
+    pub parsed: ParsedArgs,
+    pub defer_ui: bool,
+}
+
+impl SecondInstancePlan {
+    pub fn notifies(&self) -> bool {
+        !self.parsed.paths.is_empty() || !self.parsed.errors.is_empty()
+    }
+}
+
+pub fn plan_second_instance<I, S>(argv: I, cwd: &Path) -> SecondInstancePlan
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    SecondInstancePlan {
+        parsed: parse_launch_args(argv, cwd),
+        defer_ui: true,
+    }
+}
+
+fn remember(state: &OpenedFiles, parsed: &ParsedArgs) -> bool {
     if parsed.paths.is_empty() && parsed.errors.is_empty() {
-        return;
+        return false;
     }
-    if let Some(state) = app.try_state::<OpenedFiles>() {
-        if let Ok(mut allowed) = state.allowed.lock() {
-            allowed.extend(parsed.paths.iter().cloned());
-        }
-        if let Ok(mut pending) = state.pending_paths.lock() {
-            pending.extend(parsed.paths);
-        }
-        if let Ok(mut pending) = state.pending_errors.lock() {
-            pending.extend(parsed.errors);
-        }
+    if let Ok(mut allowed) = state.allowed.lock() {
+        allowed.extend(parsed.paths.iter().cloned());
     }
-    let _ = app.emit(FILES_OPENED_EVENT, ());
+    if let Ok(mut pending) = state.pending_paths.lock() {
+        pending.extend(parsed.paths.iter().cloned());
+    }
+    if let Ok(mut pending) = state.pending_errors.lock() {
+        pending.extend(parsed.errors.iter().cloned());
+    }
+    true
 }
 
-/// Brings the main window forward. A minimized window is restored to its last
-/// normal size (never maximized); a tiny or off-screen rect is replaced.
-pub fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        crate::window_placement::on_second_instance(&window);
-    }
-}
-
-/// Returns and clears the queued file paths and parse errors.
-#[tauri::command]
-pub fn take_opened_files(state: tauri::State<'_, OpenedFiles>) -> OpenedFileBatch {
+fn drain(state: &OpenedFiles) -> OpenedFileBatch {
     let paths = state
         .pending_paths
         .lock()
@@ -207,6 +227,83 @@ pub fn take_opened_files(state: tauri::State<'_, OpenedFiles>) -> OpenedFileBatc
         .map(|mut pending| std::mem::take(&mut *pending))
         .unwrap_or_default();
     OpenedFileBatch { paths, errors }
+}
+
+/// Queues files for the frontend and notifies it. Empty input does not emit.
+pub fn queue<R: Runtime>(app: &AppHandle<R>, parsed: ParsedArgs) {
+    let notify = match app.try_state::<OpenedFiles>() {
+        Some(state) => remember(&state, &parsed),
+        None => !parsed.paths.is_empty() || !parsed.errors.is_empty(),
+    };
+    if notify {
+        let _ = app.emit(FILES_OPENED_EVENT, ());
+    }
+}
+
+/// Windows second launch. Stores paths immediately, then posts the tab event and
+/// the window restore. Nothing here may call into the window or the webview:
+/// the caller is the single-instance `WM_COPYDATA` handler.
+pub fn accept_windows_second_instance<R: Runtime>(
+    app: &AppHandle<R>,
+    argv: Vec<String>,
+    cwd: String,
+) {
+    let plan = plan_second_instance(argv, Path::new(&cwd));
+    let notify = match app.try_state::<OpenedFiles>() {
+        Some(state) => remember(&state, &plan.parsed),
+        None => plan.notifies(),
+    };
+    if plan.defer_ui {
+        schedule_second_instance_ui(app.clone(), notify);
+    } else {
+        deliver_second_instance_ui(app, notify);
+    }
+}
+
+fn schedule_second_instance_ui<R: Runtime>(app: AppHandle<R>, notify: bool) {
+    // `AppHandle::run_on_main_thread` runs the closure inline when it is already
+    // on the UI thread, which is exactly the WM_COPYDATA stack we have to leave.
+    // Posting from another thread goes through the event-loop queue
+    // (`PostMessage`) and runs only after this handler returns.
+    let spawned = std::thread::Builder::new()
+        .name("pdfcraft-second-instance".into())
+        .spawn(move || {
+            let posted = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                deliver_second_instance_ui(&posted, notify);
+            });
+        });
+    if spawned.is_err() {
+        eprintln!("pdfcraft: could not schedule the second-instance open");
+    }
+}
+
+fn deliver_second_instance_ui<R: Runtime>(app: &AppHandle<R>, notify: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        crate::window_placement::on_second_instance(&window);
+    }
+    if notify {
+        let _ = app.emit(FILES_OPENED_EVENT, ());
+    }
+}
+
+/// Brings the main window forward. A minimized window is restored to its last
+/// normal size (never maximized); a tiny or off-screen rect is replaced.
+///
+/// Not for the Windows single-instance callback; that path has to go through
+/// [`accept_windows_second_instance`] so the restore is not nested inside
+/// `WM_COPYDATA`. macOS file-open events are already on the event loop.
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
+pub fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        crate::window_placement::on_second_instance(&window);
+    }
+}
+
+/// Returns and clears the queued file paths and parse errors.
+#[tauri::command]
+pub fn take_opened_files(state: tauri::State<'_, OpenedFiles>) -> OpenedFileBatch {
+    drain(&state)
 }
 
 /// True when files or errors are waiting (without taking them).
@@ -408,6 +505,45 @@ mod tests {
         assert!(authorize_read("file:///tmp/queued.pdf", &allowed).is_err());
         assert!(authorize_read("", &allowed).is_err());
         assert!(authorize_read("notes.txt", &allowed).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Windows second launch must leave the PDF in the queue for Studio to
+    /// open as a tab, and it must not do that by touching the window inside
+    /// WM_COPYDATA (`defer_ui`). A later launch is another queued tab.
+    #[test]
+    fn second_instance_queues_a_tab_and_defers_the_window() {
+        let dir = scratch();
+        let first = dir.join("already-open.pdf");
+        let second = dir.join("from the shell.pdf");
+        std::fs::write(&first, b"%PDF").unwrap();
+        std::fs::write(&second, b"%PDF").unwrap();
+
+        let opened = plan_second_instance(["pdfcraft", "already-open.pdf"], &dir);
+        assert!(opened.defer_ui, "window work has to leave WM_COPYDATA");
+        assert!(opened.notifies(), "{opened:?}");
+        let state = OpenedFiles::default();
+        assert!(remember(&state, &opened.parsed));
+        let taken = drain(&state);
+        assert_eq!(taken.paths.len(), 1, "{taken:?}");
+        assert!(taken.paths[0].ends_with("already-open.pdf"), "{taken:?}");
+        assert!(taken.errors.is_empty(), "{taken:?}");
+
+        let again = plan_second_instance(["pdfcraft", "from the shell.pdf"], &dir);
+        assert!(again.defer_ui);
+        assert!(again.notifies());
+        assert!(remember(&state, &again.parsed));
+        let tab = drain(&state);
+        assert_eq!(tab.paths.len(), 1, "{tab:?}");
+        assert!(tab.paths[0].ends_with("from the shell.pdf"), "{tab:?}");
+        assert!(tab.errors.is_empty(), "{tab:?}");
+
+        let bare = plan_second_instance(["pdfcraft"], &dir);
+        assert!(bare.defer_ui);
+        assert!(!bare.notifies());
+        assert!(!remember(&state, &bare.parsed));
+        assert!(drain(&state).paths.is_empty());
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

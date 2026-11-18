@@ -483,6 +483,11 @@ pub fn on_launch<R: Runtime>(window: &WebviewWindow<R>) {
 
 /// A second launch (another PDF, or a file opened from the shell). Restores a
 /// minimized window to a normal size and never leaves it maximized or fullscreen.
+///
+/// Call this from the event loop, not from the Windows single-instance
+/// `WM_COPYDATA` handler. That handler is already on the UI thread inside a
+/// foreign window procedure; `SetWindowPos` / `ShowWindow` from there re-enters
+/// this window and the second process comes up as its own top-level window.
 pub fn on_second_instance<R: Runtime>(window: &WebviewWindow<R>) {
     clear_max_fullscreen(window);
     if window.is_minimized().unwrap_or(false) {

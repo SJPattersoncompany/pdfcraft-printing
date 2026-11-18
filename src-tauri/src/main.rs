@@ -226,9 +226,9 @@ fn main() {
         // Must be the first plugin: a second launch (e.g. double-clicking another PDF)
         // hands its files to this window and exits instead of opening a new window.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-            let parsed = file_open::parse_launch_args(argv, std::path::Path::new(&cwd));
-            file_open::queue(app, parsed);
-            file_open::focus_main_window(app);
+            // Runs inside the plugin's WM_COPYDATA handler. Queue only; the tab
+            // event and window restore are posted to the event loop.
+            file_open::accept_windows_second_instance(app, argv, cwd);
         }))
         .manage(file_open::OpenedFiles::default())
         .plugin(tauri_plugin_dialog::init())
